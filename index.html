@@ -1,0 +1,552 @@
+<!-- 
+
+  Name:         subdivision.html
+
+  Author:       David Borland, The Renaissance Computing Institute (RENCI)
+
+  Copyright:    The Renaissance Computing Institute (RENCI)
+ 
+  Description:  Interactive web page to demonstrate subdivision written in d3.
+                Based on an application from Tony DeRose at Pixar:
+                https://www.youtube.com/watch?v=mX0NB9IyYpU&t=3m46s
+
+-->
+
+<!DOCTYPE html>
+<html>
+  
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+  <title> Subdivision </title>
+  <script src="https://d3js.org/d3.v3.min.js"></script>
+  
+  <style>
+    .border {
+      fill: none;
+      stroke: black;
+      pointer-events: all;
+    }
+    
+    .control {
+      stroke: red;
+      stroke-width: 3;
+    }
+    
+    .control .handle {
+      fill: white;
+    }
+    
+    .control .handle.highlight {
+      fill: #ac1a2f;
+    }
+    
+    .control .poly {
+      fill: none;  
+    }
+    
+    .subdivision {
+      stroke: black;
+      stroke-width: 2;
+      pointer-events: none;
+    }
+    
+    .subdivision .point {
+      fill: white;
+    }
+    
+    .subdivision .poly {
+      fill: none;
+    }
+    
+  </style>
+</head>
+
+<!-- Set up page -->
+<body> 
+ 
+  <svg></svg>
+  <p>
+    <button type="button" id="splitButton">Split</button>
+    <button type="button" id="averageButton">Average</button>
+    <button type="button" id="subdivideButton">Subdivide</button>
+    <button type="button" id="resetButton">Reset</button>
+  </p>
+  <p>
+    <label for="weightsInput">Weights: </label>
+    <input type="text" name="weightsInput" id="weightsInput" size="10">
+  </p>  
+  <p>
+    <input type="checkbox" name="showPolygonCheckbox" id="showPolygonCheckbox" checked >
+    <label for="showPolygonCheckbox">Show control polygon</label>
+  </p>
+  <p>
+    <input type="checkbox" name="showHandlesCheckbox" id="showHandlesCheckbox" checked >
+    <label for="showHandlesCheckbox">Show control handles</label>
+  <p>
+  </p>
+    <input type="checkbox" name="showVerticesCheckbox" id="showVerticesCheckbox" checked >
+    <label for="showVerticesCheckbox">Show vertices</label>
+  </p>
+  
+<!-- Visualization code -->  
+<script>
+
+// Size
+var size = 600;
+    
+// Radii for points
+var handleRadius = 6,
+    pointRadius = 4;
+  
+// Initial handle points
+var r = size / 2 * 0.75,
+    initialHandles = [
+      [0, r],
+      [r, 0],
+      [0, -r],
+      [-r, 0]
+    ];
+    
+// Initialize handles
+var handles;
+resetHandles();
+             
+// Initialize points array             
+var points;
+resetPoints(); 
+             
+// Weights for creating new points 
+var weights = [1, 1];
+
+// Sequence of commands
+var commands = []; 
+
+// Transition time in milliseconds
+var transitionTime = 1000;
+
+// GUI controls
+d3.select("#splitButton").on("click", function() {
+  // Split points
+  splitPoints();
+  
+  // Draw subdivision with enter transition
+  drawSubdivision(transitionTime);
+  
+  // Save this command
+  commands.push("split");
+});   
+
+d3.select("#averageButton").on("click", function() {
+  // Average points
+  averagePoints();
+  
+  // Draw subdivision with update transition
+  drawSubdivision(0, transitionTime);
+  
+  // Save this command
+  commands.push("average");
+}); 
+
+d3.select("#subdivideButton").on("click", function() {
+  // Split and draw
+  splitPoints();
+  drawSubdivision(transitionTime);
+  
+  // Wait before averaging
+  d3.timer(function() {
+    // Average and draw
+    averagePoints();
+    drawSubdivision(0, transitionTime); 
+    
+    // Only do once
+    return true;
+  }, transitionTime);
+    
+  // Save these commands
+  commands.push("split");
+  commands.push("average");
+}); 
+
+d3.select("#resetButton").on("click", function() {
+  // Reset handles and points
+  resetHandles();
+  resetPoints();
+  
+  // Draw control and subdivision
+  drawControl();
+  drawSubdivision();
+  
+  // Reset commands
+  commands = [];
+}); 
+
+d3.select("#weightsInput").attr("value", weights.join(" ")).on("change", function() {
+  // Set weights
+  weights = [];
+  this.value.split(/[^\d-.]+/).filter(function(d) { return d.length > 0; }).forEach(function(d) {
+    // Check for valid number
+    var n = +d;
+    if (!isNaN(n)) weights.push(n);
+  });
+  
+  // Update widget with valid weights  
+  this.value = weights.join(" ");
+  
+  // Generate subdivision with new weights
+  generateSubdivision();
+  
+  // Draw subdivision with update transition
+  drawSubdivision(0, transitionTime);
+}); 
+
+d3.select("#showPolygonCheckbox").on("change", function() {
+  // Set visibility of control polygon
+  d3.select("svg").select(".control").select(".poly")
+      .attr("visibility", this.checked ? "visible" : "hidden");
+}); 
+
+d3.select("#showHandlesCheckbox").on("change", function() {
+  // Set visibility of control polygon
+  d3.select("svg").select(".control").selectAll(".handle")
+      .attr("visibility", this.checked ? "visible" : "hidden");
+}); 
+
+d3.select("#showVerticesCheckbox").on("change", function() {    
+  // Set visibility of subdivision points
+  d3.select("svg").select(".subdivision").selectAll(".point")
+      .attr("visibility", this.checked ? "visible" : "hidden");
+}); 
+    
+// Set up svg element and add a group to transform the center to the origin and flip the y axis   
+var g = d3.select("svg")
+    .attr("width", size)
+    .attr("height", size)
+    .on("mousedown", function() {
+      // Stop text highlighting
+      d3.event.preventDefault();
+    })
+  .append("g")
+    .attr("transform", "translate(" + (size / 2) + "," + (size / 2) + ")scale(1,-1)");
+ 
+// Add a border rect with double-click callback for adding handles
+g.append("rect")
+    .attr("class", "border")
+    .attr("x", -size / 2)
+    .attr("y", -size / 2)
+    .attr("width", size)
+    .attr("height", size)
+    .on("dblclick", function() {
+      // Get the position
+      var m = d3.mouse(this),
+          p = [ m[0], m[1] ];
+          
+      // Get indeces for pairs of handles
+      var pairs = handles.map(function(d, i) { return [ i, offsetIndex(handles, i, 1) ]; });
+        
+      // Find closest line to this point  
+      var distances = pairs.map(function(d) { return pointLineSegmentDistance(p, handles[d[0]], handles[d[1]]); }),           
+          pair = distances.indexOf(Math.min.apply(Math, distances));
+      
+      // Insert new point
+      handles.splice(pairs[pair][1], 0, p);
+      
+      // Generate subdivision with new handles
+      generateSubdivision();
+
+      // Draw control and subdivision
+      drawControl();
+      drawSubdivision();
+    });
+   
+// Add groups for control and subdivision
+var gSubdivision = g.append("g").attr("class", "subdivision"),
+    gControl = g.append("g").attr("class", "control");
+  
+// Add groups for subdivision 
+gSubdivision.append("g").attr("class", "poly");
+gSubdivision.append("g").attr("class", "point");
+  
+// Draw the control and subdivision
+drawControl();
+drawSubdivision();
+
+// Reset handles array
+function resetHandles() {
+  // Can't use slice, as we need a deep copy of the values
+  handles = initialHandles.map(function(d) { return [ d[0], d[1] ]; });
+}
+
+// Reset points array
+function resetPoints() {
+  // Copy handles to points, with point id for object constancy
+  points = handles.map(function(d, i) { 
+    var p = [ d[0], d[1] ];
+    p.id = i;
+    
+    return p;
+  });
+}
+
+// Return the distance between a point p and a line segment p1p2
+// Based on technique described here: http://paulbourke.net/geometry/pointlineplane/
+function pointLineSegmentDistance(p, p1, p2) {
+  // Distance between two points
+  function pointPointDistance(p1, p2) {
+    return Math.sqrt(Math.pow(p2[0] - p1[0], 2) + Math.pow(p2[1] - p1[1], 2))
+  }
+  
+  // Check for coincident p1 and p2
+  if (p1[0] === p2[0] && p1[1] === p2[1]) {
+    // Return distance to one of the points
+    return pointPointDistance(p, p1);
+  }
+  
+  // Compute u
+  var u = ( (p[0] - p1[0]) * (p2[0] - p1[0]) + (p[1] - p1[1]) * (p2[1] - p1[1]) ) /
+          ( Math.pow(p2[0] - p1[0], 2) + Math.pow(p2[1] - p1[1], 2) );
+        
+  // Test u
+  if (u >= 0 && u <= 1) {
+    // In line segement, return closest point on line
+    var p3 = [ p1[0] + u * (p2[0] - p1[0]),
+               p1[1] + u * (p2[1] - p1[1]) ];
+           
+    return pointPointDistance(p, p3);
+  }
+  else {
+    // Return closest line segment end point
+    return Math.min(pointPointDistance(p, p1), pointPointDistance(p, p2));
+  }
+}
+
+// Return a string for svg polygon points from an input point array
+function polyString(p) {
+  var s = "";
+ 
+  p.forEach(function(d) { s = s.concat(d[0] + "," + d[1] + " " ); });
+  
+  return s.trim();
+} 
+
+// Get index in array a with given offset from index i
+function offsetIndex(a, i, offset) {
+  var j = (i + offset) % a.length;
+  return j < 0 ? a.length + j : j;
+}
+
+// Get element in array a with given offset from index i
+function offset(a, i, offset) {
+  return a[offsetIndex(a, i, offset)];
+}
+
+// Create new points between current points
+function splitPoints() {
+  // Split all points
+  points = d3.merge(points.map(function(d, i) {
+      return [d, split(i)];
+  }));
+  
+  // Create new point at midpoint between index i and neighbor
+  function split(i) {    
+    // Get points
+    var p1 = points[i],
+        p2 = offset(points, i, 1);
+    
+    // Return average
+    var p = [ (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2 ];
+    p.id = points.length + i;
+    
+    return p;
+  } 
+}
+
+// Update point locations based on weighted average of neighboring points
+function averagePoints() {
+  // Get offset indeces
+  var offsets = weights.map(function(d, i) { return i - Math.ceil(weights.length / 2 - 1); });
+    
+  // Average all points based on weights
+  points = points.map(function(d, i) { return average(i); });
+  
+  // Move point with index i based on weights
+  function average(i) {
+    // Copy point information
+    var p = [0, 0];
+    p.id = points[i].id;
+    
+    // Compute weighted average
+    weights.forEach(function(d, j) {
+      // Get offset point
+      var po = offset(points, i, offsets[j]);
+      
+      // Add weighted point
+      p[0] += po[0] * d;
+      p[1] += po[1] * d;
+    });
+    
+    // Normalize by weight sum
+    var sum = d3.sum(weights);
+    
+    // Check for divide by zero!
+    if (sum !== 0) {
+      p[0] /= sum;
+      p[1] /= sum;
+    }
+    
+    return p;
+  }
+}
+
+// Reset points and regenerate subdivision based on sequence of user commands
+function generateSubdivision() {
+  // Reset points
+  resetPoints();
+  
+  // Replay the sequence of commands
+  commands.forEach(function(d) {
+    switch(d) {
+      // Split
+      case "split":
+        splitPoints();
+        break;
+        
+      // Average
+      case "average":
+        averagePoints();
+        break;               
+    }
+  });
+}
+
+// Draw the subdivision polygon and points
+function drawSubdivision(enterTime, updateTime) { 
+  // Default to zero transition times
+  if (arguments.length < 2) updateTime = 0;
+  if (arguments.length < 1) enterTime = 0;
+  
+  // Bind point data for polygon
+  var polygon = gSubdivision.select(".poly").selectAll("polygon")
+      .data([points]);
+  
+  // Enter
+  polygon.enter().append("polygon");
+      
+  // Enter + update
+  polygon.transition()
+      .duration(updateTime)
+      .attr("points", polyString);
+      
+  // Bind point data for points, using point id for object constancy
+  var point = gSubdivision.select(".point").selectAll("circle")
+      .data(points, function(d) { return d.id; });
+      
+  // Enter + update
+  point.transition()
+      .duration(updateTime)
+      .attr("cx", function(d) { return d[0]; })
+      .attr("cy", function(d) { return d[1]; });
+      
+  // Enter
+  point.enter().append("circle")
+      .attr("r", 0)
+      .attr("cx", function(d) { return d[0]; })
+      .attr("cy", function(d) { return d[1]; })
+    .transition()
+      .duration(enterTime)
+      .attr("r", pointRadius);
+      
+  // Exit
+  point.exit().remove();
+}
+
+// Draw the control polygon and handles
+function drawControl() {    
+  // Bind handle data for polygon
+  var polygon = gControl.selectAll(".poly")
+      .data([handles]);
+  
+  // Enter
+  polygon.enter().append("polygon")
+      .attr("class", "poly");
+    
+  // Enter + update
+  polygon.attr("points", polyString);
+
+  // Drag behavior for control handles
+  var drag = d3.behavior.drag()
+    .on("dragstart", function(d) {
+      // Turn off mouse events for other handles while dragging
+      gControl.selectAll(".handle").filter(function(e) { return e !== d; })
+          .style("pointer-events", "none");
+    })
+    .on("drag", function(d) {
+      // Make sure still highlighted
+      d3.select(this).classed("highlight", true);
+      
+      // Constrain point
+      var s = size / 2,
+          r = handleRadius + 2,
+          x = Math.max(-s + r, Math.min(s - r, d3.event.x)),
+          y = Math.max(-s + r, Math.min(s - r, d3.event.y));
+
+      // Set new point
+      d[0] = x;
+      d[1] = y;
+      
+      // Update control
+      drawControl();
+
+      // Generate and redraw subdivision
+      generateSubdivision();
+      drawSubdivision();
+    })
+    .on("dragend", function() {     
+      // Turn mouse events back on for handles
+      gControl.selectAll(".handle")
+          .style("pointer-events", null);
+    });
+
+  // Bind point data for control handles
+  var handle = gControl.selectAll(".handle")
+      .data(handles);
+    
+  // Enter  
+  handle.enter().append("circle")
+      .attr("class", "handle")
+      .attr("r", handleRadius)
+      .on("mouseover", function() {        
+        // Highlight
+        d3.select(this).classed("highlight", true);
+      })      
+      .on("mouseout", function() {
+        // Normal
+        d3.select(this).classed("highlight", false);
+      })
+      .on("dblclick", function(d, i) {
+        // Keep at least three handles
+        if (handles.length === 3) return;
+
+        // Remove handle
+        handles.splice(i, 1);
+        
+        // Update control
+        drawControl();
+
+        // Generate and redraw subdivision
+        generateSubdivision();
+        drawSubdivision();
+      })
+      .call(drag);
+    
+  // Enter + update
+  handle
+      .attr("cx", function(d) { return d[0]; })
+      .attr("cy", function(d) { return d[1]; });
+    
+  // Exit
+  handle.exit().remove();
+}
+
+</script>
+</body>
+</html>
